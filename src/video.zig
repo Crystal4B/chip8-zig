@@ -13,3 +13,7 @@ pub fn init() Video {
         .gfx = std.mem.zeroes([RESOLUTION]u1),
     };
 }
+
+pub fn clear(video: *Video) void {
+    video.gfx = std.mem.zeroes([RESOLUTION]u1);
+}
