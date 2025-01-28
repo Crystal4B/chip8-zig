@@ -305,14 +305,38 @@ fn LDI(cpu: *Cpu, operand: operands.Operand) void {
     cpu.i = operand.Abs;
 }
 
+test "ADD takes either a REGXY or REGV operand and adds the values within it together" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 5;
+    cpu.v[0x2] = 3;
+
+    var operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+        .YReg = 0x2,
+    };
+
+    ADD(&cpu, operand);
+    try std.testing.expect(cpu.v[0x1] == 8); // 5 + 3
+
+    operand.Layout = operands.OperandLayout.REGV;
+    operand.YReg = null;
+    operand.Abs = 6;
+
+    ADD(&cpu, operand);
+    try std.testing.expect(cpu.v[0x1] == 14); // 8 + 6
+}
+
 /// Performs and add operation where Vx and Vy are added together and stored in Vx,
 /// flag is set if overflow happens
 fn ADD(cpu: *Cpu, operand: operands.Operand) void {
-    var value = null;
+    // FIXME: OPTIONAL HELL (APPLIES TO ALL OPERATIONS)
+    var value = operand.Abs;
     if (operand.Layout == operands.OperandLayout.REGXY) {
-        value = cpu.v[operand.YReg];
-    } else if (operand.Layout == operands.OperandLayout.REGV) {
-        value = operand.Abs;
+        value = cpu.v[operand.YReg.?];
     }
 
     if (operand.XReg == null or value == null) {
@@ -322,10 +346,15 @@ fn ADD(cpu: *Cpu, operand: operands.Operand) void {
     // TODO: better way to activate overflow detection
     if (operand.Layout == operands.OperandLayout.REGXY) {
         const U8_MAX = 0xFF;
-        cpu.v[FLAG_REGISTER] = cpu.v[operand.YReg] > (U8_MAX - cpu.v[operand.XReg]);
+        if (cpu.v[operand.YReg.?] > (U8_MAX - cpu.v[operand.XReg.?])) {
+            cpu.v[FLAG_REGISTER] = 1;
+        } else {
+            cpu.v[FLAG_REGISTER] = 0;
+        }
     }
 
-    cpu.v[operand.XReg] += value;
+    const unwrappedValue = value.?;
+    cpu.v[operand.XReg.?] += @intCast(unwrappedValue);
 }
 
 /// Performs bitwise OR on values of Vx and Vy, store result in Vx
