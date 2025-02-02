@@ -204,10 +204,27 @@ fn CLS(cpu: *Cpu, operand: operands.Operand) void {
     DRW(cpu, operand);
 }
 
+test "RET returns from a called subroutine" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.stack[0] = 0x020;
+    cpu.sp = 1;
+    cpu.pc = 0xB23;
+
+    const operand = operands.Operand{ .Layout = operands.OperandLayout.NONE };
+
+    try RET(&cpu, operand);
+
+    try std.testing.expectEqual(0x01E, cpu.pc); // PC should now be at 0x020 - 2 = 0x01E
+    try std.testing.expectEqual(0, cpu.sp); // cpu should now back to 0
+}
+
 /// Performs a returns from a subroutine
-fn RET(cpu: *Cpu, operand: operands.Operand) void {
+fn RET(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.NONE) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
     cpu.sp -= 1;
@@ -224,88 +241,282 @@ fn SYS(cpu: *Cpu, operand: operands.Operand) void {
     CALL(cpu, operand);
 }
 
+test "JP jumps to a specific address" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    const operand = operands.Operand{ .Layout = operands.OperandLayout.ABS, .Abs = 0xB23 };
+
+    try JP(&cpu, operand);
+
+    try std.testing.expectEqual(0xB21, cpu.pc); // PC should now be at 0xB23 - 2 (before every instruction the CPU moves up 2)
+}
+
 /// Performs a jump to an address
-fn JP(cpu: *Cpu, operand: operands.Operand) void {
+fn JP(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.ABS) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.pc = operand.Abs - PC_INCREMENT;
+    const addr = operand.Abs orelse return error.InvalidOperand;
+
+    cpu.pc = addr - PC_INCREMENT;
+}
+
+test "JP0 jumps to an address offset the value of register 0" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0] = 0x10;
+
+    const operand = operands.Operand{ .Layout = operands.OperandLayout.ABS, .Abs = 0xB23 };
+
+    try JP0(&cpu, operand);
+
+    try std.testing.expectEqual(0xB31, cpu.pc); // PC should now be at 0x10 + 0xB23 - 2 (before every instruction the CPU moves up 2)
 }
 
 /// Performs a jump to an address offset by the VF
-fn JP0(cpu: *Cpu, operand: operands.Operand) void {
+fn JP0(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.ABS) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.pc = cpu.v[FLAG_REGISTER] + operand.Abs - PC_INCREMENT;
+    const addr = operand.Abs orelse return error.InvalidOperand;
+
+    cpu.pc = cpu.v[0] + addr - PC_INCREMENT;
+}
+
+test "Call runs a subroutine" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.pc = 0x020;
+
+    const operand = operands.Operand{ .Layout = operands.OperandLayout.ABS, .Abs = 0xB23 };
+
+    try CALL(&cpu, operand);
+
+    try std.testing.expectEqual(0xB21, cpu.pc); // PC should now be at 0xB23 - 2 = 0xB21
+    try std.testing.expectEqual(1, cpu.sp); // cpu should now be at sp 1
+    try std.testing.expectEqual(0x020, cpu.stack[0]); // stack should have old pc
 }
 
 /// Performs a call to a subroutine
-fn CALL(cpu: *Cpu, operand: operands.Operand) void {
+fn CALL(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.ABS) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
     cpu.stack[cpu.sp] = cpu.pc;
     cpu.sp += 1;
-    JP(operand);
+
+    return JP(cpu, operand);
+}
+
+test "SE skips next instruction if values are equal" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.pc = 0x020;
+    cpu.v[0x1] = 0x12;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .XReg = 0x1,
+        .Abs = 0x12,
+    };
+
+    try SE(&cpu, operand);
+
+    try std.testing.expectEqual(0x022, cpu.pc); // PC should now be at 0x020 + 2 = 0x022
+}
+
+test "SE does not skip next instruction if values are not equal" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.pc = 0x020;
+    cpu.v[0x1] = 0x12;
+    cpu.v[0x3] = 0x22;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+        .YReg = 0x3,
+    };
+
+    try SE(&cpu, operand);
+
+    try std.testing.expectEqual(0x020, cpu.pc); // PC should not change
 }
 
 /// Performs a conditional equality check, skips next instruction if true
-fn SE(cpu: *Cpu, operand: operands.Operand) void {
-    var value = null;
-    if (operand.Layout == operands.OperandLayout.REGXY) {
-        value = cpu.v[operand.YReg];
-    } else if (operand.Layout == operands.OperandLayout.REGV) {
-        value = operand.Abs;
+fn SE(cpu: *Cpu, operand: operands.Operand) !void {
+    var value: u8 = 0;
+    if (operand.Layout == operands.OperandLayout.REGV) {
+        const absValue = operand.Abs orelse return error.InvalidOperand;
+        value = @intCast(absValue);
+    } else if (operand.Layout == operands.OperandLayout.REGXY) {
+        const yreg = operand.YReg orelse return error.InvalidOperand;
+        value = cpu.v[yreg];
+    } else {
+        return error.InvalidOperand;
     }
 
-    if (operand.XReg == null or value == null) {
-        @panic("incorrect operand layout");
-    }
+    const xreg = operand.XReg orelse return error.InvalidOperand;
 
-    if (cpu.v[operand.XReg] == value) {
+    if (cpu.v[xreg] == value) {
         cpu.pc += PC_INCREMENT;
     }
+}
+
+test "SNE skips next instruction if values are not equal" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.pc = 0x020;
+    cpu.v[0x1] = 0x12;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .XReg = 0x1,
+        .Abs = 0x14,
+    };
+
+    try SNE(&cpu, operand);
+
+    try std.testing.expectEqual(0x022, cpu.pc); // PC should now be at 0x020 + 2 = 0x022
+}
+
+test "SNE does not skip next instruction if values are equal" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.pc = 0x020;
+    cpu.v[0x1] = 0x12;
+    cpu.v[0x3] = 0x12;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+        .YReg = 0x3,
+    };
+
+    try SNE(&cpu, operand);
+
+    try std.testing.expectEqual(0x020, cpu.pc); // PC should not change
 }
 
 /// Performs a conditional equality check, skips next instruction if false
-fn SNE(cpu: *Cpu, operand: operands.Operand) void {
-    if (operand.Layout != operands.OperandLayout.REGV) {
-        @panic("incorrect operand layout");
+fn SNE(cpu: *Cpu, operand: operands.Operand) !void {
+    var value: u8 = 0;
+    if (operand.Layout == operands.OperandLayout.REGV) {
+        const absValue = operand.Abs orelse return error.InvalidOperand;
+        value = @intCast(absValue);
+    } else if (operand.Layout == operands.OperandLayout.REGXY) {
+        const yreg = operand.YReg orelse return error.InvalidOperand;
+        value = cpu.v[yreg];
+    } else {
+        return error.InvalidOperand;
     }
 
-    if (cpu.v[operand.XReg] != operand.Abs) {
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+
+    if (cpu.v[xreg] != value) {
         cpu.pc += PC_INCREMENT;
     }
 }
 
-fn LD(cpu: *Cpu, operand: operands.Operand) void {
-    var value = null;
-    if (operand.Layout == operands.OperandLayout.REGXY) {
-        value = cpu.v[operand.YReg];
-    } else if (operand.Layout == operands.OperandLayout.REGV) {
-        value = operand.Abs;
-    }
+test "LD sets value of XReg to YReg" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
 
-    if (operand.XReg == null or value == null) {
-        @panic("incorrect operand layout");
-    }
+    cpu.v[0x1] = 5;
+    cpu.v[0x2] = 2;
 
-    cpu.v[operand.XReg] = value;
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+        .YReg = 0x2,
+    };
+
+    try LD(&cpu, operand);
+
+    try std.testing.expectEqual(2, cpu.v[0x1]); // 0x1 should now store value of 0x2 (2)
+    try std.testing.expectEqual(2, cpu.v[0x2]); // 0x2 should not change
 }
 
-fn LDI(cpu: *Cpu, operand: operands.Operand) void {
+test "LD sets value of XReg to an absolute value" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 5;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .XReg = 0x1,
+        .Abs = 4,
+    };
+
+    try LD(&cpu, operand);
+
+    try std.testing.expectEqual(4, cpu.v[0x1]); // 0x1 should now store value of Abs (4)
+}
+
+/// LD loads data into a register
+fn LD(cpu: *Cpu, operand: operands.Operand) !void {
+    var value: u8 = 0;
+    if (operand.Layout == operands.OperandLayout.REGV) {
+        const absValue = operand.Abs orelse return error.InvalidOperand;
+        value = @intCast(absValue);
+    } else if (operand.Layout == operands.OperandLayout.REGXY) {
+        const yreg = operand.YReg orelse return error.InvalidOperand;
+        value = cpu.v[yreg];
+    } else {
+        return error.InvalidOperand;
+    }
+
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+
+    cpu.v[xreg] = value;
+}
+
+test "LDI sets value of I to an absolute value" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.ABS,
+        .Abs = 4,
+    };
+
+    try LDI(&cpu, operand);
+
+    try std.testing.expectEqual(4, cpu.i); // 0x1 should now store value of Abs (4)
+}
+
+/// LDI loads data into the index register
+fn LDI(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.ABS) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.i = operand.Abs;
+    const value = operand.Abs orelse return error.InvalidOperand;
+    cpu.i = value;
 }
 
-test "ADD takes either a REGXY or REGV operand and adds the values within it together" {
+test "ADD with REGXY type operand" {
     const test_pkg = @import("test.zig");
     const env = test_pkg.createTestEnv();
     var cpu = env.cpu;
@@ -313,85 +524,262 @@ test "ADD takes either a REGXY or REGV operand and adds the values within it tog
     cpu.v[0x1] = 5;
     cpu.v[0x2] = 3;
 
-    var operand = operands.Operand{
+    const operand = operands.Operand{
         .Layout = operands.OperandLayout.REGXY,
         .XReg = 0x1,
         .YReg = 0x2,
     };
 
-    ADD(&cpu, operand);
-    try std.testing.expect(cpu.v[0x1] == 8); // 5 + 3
+    try ADD(&cpu, operand);
+    try std.testing.expectEqual(8, cpu.v[0x1]); // 5 + 3
+    try std.testing.expectEqual(0, cpu.v[FLAG_REGISTER]); // No overflow
+}
 
-    operand.Layout = operands.OperandLayout.REGV;
-    operand.YReg = null;
-    operand.Abs = 6;
+test "ADD with REGV type operand" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
 
-    ADD(&cpu, operand);
-    try std.testing.expect(cpu.v[0x1] == 14); // 8 + 6
+    cpu.v[0x1] = 5;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .XReg = 0x1,
+        .Abs = 6,
+    };
+
+    try ADD(&cpu, operand);
+    try std.testing.expectEqual(11, cpu.v[0x1]); // 5 + 6
+    try std.testing.expectEqual(0, cpu.v[FLAG_REGISTER]); // No overflow
+}
+
+test "ADD with overflow" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 200;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .XReg = 0x1,
+        .Abs = 100,
+    };
+
+    try ADD(&cpu, operand);
+    try std.testing.expectEqual(44, cpu.v[0x1]); // (200 + 100) % 256 = 44
+    try std.testing.expectEqual(1, cpu.v[FLAG_REGISTER]); // Overflow occured
+}
+
+test "ADD with missing XReg should fail" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGV,
+        .Abs = 100,
+    };
+
+    const result = ADD(&cpu, operand);
+    try std.testing.expectError(error.InvalidOperand, result);
+}
+
+test "ADD with REGXY and missing YReg should fail" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 200;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+    };
+
+    const result = ADD(&cpu, operand);
+    try std.testing.expectError(error.InvalidOperand, result);
+}
+
+test "ADD with incorrect operand type" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 200;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REG,
+        .XReg = 0x1,
+    };
+
+    const result = ADD(&cpu, operand);
+    try std.testing.expectError(error.InvalidOperand, result);
 }
 
 /// Performs and add operation where Vx and Vy are added together and stored in Vx,
 /// flag is set if overflow happens
-fn ADD(cpu: *Cpu, operand: operands.Operand) void {
-    // FIXME: OPTIONAL HELL (APPLIES TO ALL OPERATIONS)
-    var value = operand.Abs;
-    if (operand.Layout == operands.OperandLayout.REGXY) {
-        value = cpu.v[operand.YReg.?];
+fn ADD(cpu: *Cpu, operand: operands.Operand) !void {
+    var value: u8 = 0;
+    if (operand.Layout == operands.OperandLayout.REGV) {
+        const absValue = operand.Abs orelse return error.InvalidOperand;
+        value = @intCast(absValue);
+    } else if (operand.Layout == operands.OperandLayout.REGXY) {
+        const yreg = operand.YReg orelse return error.InvalidOperand;
+        value = cpu.v[yreg];
+    } else {
+        return error.InvalidOperand;
     }
 
-    if (operand.XReg == null or value == null) {
-        @panic("incorrect operand layout");
-    }
+    const xreg = operand.XReg orelse return error.InvalidOperand;
 
-    // TODO: better way to activate overflow detection
-    if (operand.Layout == operands.OperandLayout.REGXY) {
-        const U8_MAX = 0xFF;
-        if (cpu.v[operand.YReg.?] > (U8_MAX - cpu.v[operand.XReg.?])) {
-            cpu.v[FLAG_REGISTER] = 1;
-        } else {
-            cpu.v[FLAG_REGISTER] = 0;
-        }
-    }
+    const result, const overflow = @addWithOverflow(cpu.v[xreg], value);
 
-    const unwrappedValue = value.?;
-    cpu.v[operand.XReg.?] += @intCast(unwrappedValue);
+    cpu.v[FLAG_REGISTER] = overflow;
+    cpu.v[xreg] = result;
+}
+
+test "OR performs bitwise OR on values of Vx and Vy, store result in Vx" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x1] = 0x0F;
+    cpu.v[0x2] = 0xF0;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x1,
+        .YReg = 0x2,
+    };
+
+    try OR(&cpu, operand);
+    try std.testing.expect(cpu.v[0x1] == 0xFF); // 0x0F | 0xF0
 }
 
 /// Performs bitwise OR on values of Vx and Vy, store result in Vx
-fn OR(cpu: *Cpu, operand: operands.Operand) void {
+fn OR(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.REGXY) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.v[operand.XReg] = cpu.v[operand.XReg] | cpu.v[operand.YReg];
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const yreg = operand.YReg orelse return error.InvalidOperand;
+
+    cpu.v[xreg] = cpu.v[xreg] | cpu.v[yreg];
+}
+
+test "AND performs a bitwise AND on values of Vx and Vy, store result in Vx" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 0x0F;
+    cpu.v[0x5] = 0xF0;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x4,
+        .YReg = 0x5,
+    };
+
+    try AND(&cpu, operand);
+    try std.testing.expect(cpu.v[0x4] == 0x00); // 0x0F & 0xF0
 }
 
 /// Performs bitwise AND on values of Vx and Vy, store in Vx
-fn AND(cpu: *Cpu, operand: operands.Operand) void {
+fn AND(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.REGXY) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.v[operand.XReg] = cpu.v[operand.XReg] & cpu.v[operand.YReg];
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const yreg = operand.YReg orelse return error.InvalidOperand;
+
+    cpu.v[xreg] = cpu.v[xreg] & cpu.v[yreg];
+}
+
+test "XOR performs a bitwise XOR on values of Vx and Vy, store result in Vx" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 0x0F;
+    cpu.v[0x5] = 0xF0;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x4,
+        .YReg = 0x5,
+    };
+
+    try XOR(&cpu, operand);
+    try std.testing.expect(cpu.v[0x4] == 0xFF); // 0x0F ^ 0xF0
 }
 
 /// Performs bitwise XOR on values of Vx and Vy, store in Vx
-fn XOR(cpu: *Cpu, operand: operands.Operand) void {
+fn XOR(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.REGXY) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.v[operand.XReg] = cpu.v[operand.XReg] ^ cpu.v[operand.YReg];
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const yreg = operand.YReg orelse return error.InvalidOperand;
+
+    cpu.v[xreg] = cpu.v[xreg] ^ cpu.v[yreg];
+}
+
+test "SUB with REGXY operand" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 8;
+    cpu.v[0x5] = 4;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x4,
+        .YReg = 0x5,
+    };
+
+    try SUB(&cpu, operand);
+    try std.testing.expectEqual(4, cpu.v[0x4]); // 8 - 4 = 4
+    try std.testing.expectEqual(0, cpu.v[FLAG_REGISTER]); // No underflow
+}
+
+test "SUB with underflow" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 0;
+    cpu.v[0x5] = 4;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x4,
+        .YReg = 0x5,
+    };
+
+    try SUB(&cpu, operand);
+    try std.testing.expectEqual(252, cpu.v[0x4]); // 0 - 4 = 252 (underflow)
+    try std.testing.expectEqual(1, cpu.v[FLAG_REGISTER]); // underflow
 }
 
 /// Performs subtraction where Vy is subtracted from Vx, store in Vx
-fn SUB(cpu: *Cpu, operand: operands.Operand) void {
+fn SUB(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.REGXY) {
-        @panic("incorrect operand layout");
+        return error.InvalidOperand;
     }
 
-    cpu.v[FLAG_REGISTER] = cpu.v[operand.XReg] > cpu.v[operand.YReg];
-    cpu.v[operand.XReg] -= cpu.v[operand.YReg];
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const yreg = operand.YReg orelse return error.InvalidOperand;
+
+    const result, const overflow = @subWithOverflow(cpu.v[xreg], cpu.v[yreg]);
+
+    cpu.v[FLAG_REGISTER] = overflow;
+    cpu.v[xreg] = result;
 }
 
 fn SHR(_: *Cpu, operand: operands.Operand) void {
@@ -402,14 +790,57 @@ fn SHR(_: *Cpu, operand: operands.Operand) void {
     @panic("unimplemented");
 }
 
+test "SUBN with REGXY operand" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 8;
+    cpu.v[0x5] = 4;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x5,
+        .YReg = 0x4,
+    };
+
+    try SUBN(&cpu, operand);
+    try std.testing.expectEqual(4, cpu.v[0x5]); // 8 - 4 = 4
+    try std.testing.expectEqual(0, cpu.v[FLAG_REGISTER]); // No underflow
+}
+
+test "SUBN with underflow" {
+    const test_pkg = @import("test.zig");
+    const env = test_pkg.createTestEnv();
+    var cpu = env.cpu;
+
+    cpu.v[0x4] = 0;
+    cpu.v[0x5] = 4;
+
+    const operand = operands.Operand{
+        .Layout = operands.OperandLayout.REGXY,
+        .XReg = 0x5,
+        .YReg = 0x4,
+    };
+
+    try SUBN(&cpu, operand);
+    try std.testing.expectEqual(252, cpu.v[0x5]); // 0 - 4 = 252 (underflow)
+    try std.testing.expectEqual(1, cpu.v[FLAG_REGISTER]); // underflow
+}
+
 /// Performs subtraction where Vx is subtracted from Vy, store in Vx
-fn SUBN(cpu: *Cpu, operand: operands.Operand) void {
+fn SUBN(cpu: *Cpu, operand: operands.Operand) !void {
     if (operand.Layout != operands.OperandLayout.REGXY) {
         @panic("incorrect operand layout");
     }
 
-    cpu.v[FLAG_REGISTER] = cpu.v[operand.YReg] > cpu.v[operand.XReg];
-    cpu.v[operand.XReg] = cpu.v[operand.YReg] - cpu.v[operand.XReg];
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const yreg = operand.YReg orelse return error.InvalidOperand;
+
+    const result, const overflow = @subWithOverflow(cpu.v[yreg], cpu.v[xreg]);
+
+    cpu.v[FLAG_REGISTER] = overflow;
+    cpu.v[xreg] = result;
 }
 
 fn SHL(_: *Cpu, operand: operands.Operand) void {
@@ -429,7 +860,10 @@ fn RND(cpu: *Cpu, operand: operands.Operand) void {
     var rand = std.rand.DefaultPrng.init(std.heap.page_allocator);
     const random = rand.int(u8);
 
-    cpu.v[operand.XReg] = operand.Abs & random;
+    const xreg = operand.XReg orelse return error.InvalidOperand;
+    const absValue = operand.Abs orelse return error.InvalidOperand;
+
+    cpu.v[xreg] = absValue & random;
 }
 
 /// Performs a draw of an n-byte sprite starting at memory location (Vx, Vy)
